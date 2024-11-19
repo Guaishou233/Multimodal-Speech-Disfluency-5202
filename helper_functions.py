@@ -82,8 +82,9 @@ def __shuffle_pick_quarter_data__ (x_f, y_f, x_s, y_s) :
     return x_train, y_train
 
 
-def save_checkpoint(state, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, filename='checkpoint.pth'):
     torch.save(state, filename)
+
 
 ##################################################################################################
 class AverageMeter():
