@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torchaudio
+from cffi.model import qualify
 from torchsampler import ImbalancedDatasetSampler
 import sys
 # sys.path.append('/home/payal/multimodal_speech/main_codebase/')
@@ -149,8 +150,9 @@ if __name__ == '__main__':
 
     run = wandb.init(
         # Set the project where this run will be logged
-        project="my-project",
+        project="Multimodal-Speech-Disfluency",
         name= "Multimodal-Speech-Disfluency",
+        settings=wandb.Settings(init_timeout=120),
         # Track hyperparameters and run metadata
         config={
             "learning_rate": 0.01,
@@ -386,7 +388,10 @@ if __name__ == '__main__':
             Arguments:
                 x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
             """
-            x = x + self.pe[:x.size(0)].to(device)
+            if quantified:
+                x = x + self.pe[:x.size(0)].to("cpu")
+            else:
+                x = x + self.pe[:x.size(0)].to(device)
             return self.dropout(x)
 
 
@@ -411,13 +416,22 @@ if __name__ == '__main__':
             if self.training and self.p > 0:
                 # Draw a random number from a Bernoulli distribution
                 # mask = torch.bernoulli(self.p).to(device)
-                mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
-                if (mask == 0).all():
-                    print('Dropping Video')
-                # mask = torch.bernoulli()
-                x = x.to(device)
-                x = x * mask
-                x = x.to(device)
+                if quantified:
+                    mask = torch.bernoulli(torch.ones(1) * self.p).to('cpu')
+                    if (mask == 0).all():
+                        print('Dropping Video')
+                    # mask = torch.bernoulli()
+                    x = x.to('cpu')
+                    x = x * mask
+                    x = x.to('cpu')
+                else:
+                    mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
+                    if (mask == 0).all():
+                        print('Dropping Video')
+                    # mask = torch.bernoulli()
+                    x = x.to(device)
+                    x = x * mask
+                    x = x.to(device)
             return x
 
 
@@ -694,7 +708,7 @@ if __name__ == '__main__':
 
         return class_loss_valid, class_acc_valid, f1_score_valid
 
-    def matric_flop(test_loader, model):
+    def matric_flop(test_loader, model,device):
         for i, (feat_a, feat_v, y) in enumerate(test_loader):
             model.eval()
             feat_v = RandomMasking(p=p_mask)(feat_v)
@@ -706,7 +720,7 @@ if __name__ == '__main__':
         wandb.log({'flops': flops, 'params': params})
 
 
-    def matric_FPS(valid_loader, model):
+    def matric_FPS(valid_loader, model,device):
         for i, (feat_a, feat_v, y) in enumerate(valid_loader):
             model.eval()
             feat_v = RandomMasking(p=p_mask)(feat_v)
@@ -775,17 +789,12 @@ if __name__ == '__main__':
         }, filename=model_chkpt_pth +'baseline_{:04d}.pth'.format(num_epochs + trained_epoch))
 
         if test_matric:
-            matric_FPS(test_dataloader, model)
-            matric_flop(test_dataloader, model)
+            matric_FPS(test_dataloader, model,device)
+            matric_flop(test_dataloader, model,device)
     else:
-        quantified_net = None
-        for i,(feat_a, feat_v, y) in enumerate(train_dataloader) :
-            feat_a = feat_a.float()
-            feat_v = feat_v.float()
-            quantified_net = quantification_net(model,feat_a, feat_v)
-            matric_FPS(train_dataloader, model)
-            matric_flop(train_dataloader, model)
-            break
+        quantified_net = quantification_net(model,train_dataloader)
+        # matric_FPS(train_dataloader, quantified_net.to("cpu"),"cpu")
+        # matric_flop(train_dataloader, quantified_net.to("cpu"),"cpu")
 
         save_checkpoint({
             'model_state_dict': quantified_net.state_dict(),

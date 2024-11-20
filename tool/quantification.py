@@ -4,7 +4,7 @@ import torch.ao.quantization as quant
 
 
 
-def quantification_net(model,rep_data_a,req_data_v):
+def quantification_net(model,train_dataloader):
     # define a floating point model where some layers could be statically quantized
     # create a model instance
     model_fp32 = model.to('cpu')
@@ -45,7 +45,10 @@ def quantification_net(model,rep_data_a,req_data_v):
 
     # calibrate the prepared model to determine quantization parameters for activations
     # in a real world setting, the calibration would be done with a representative dataset
-    model_fp32_prepared(rep_data_a,req_data_v)
+    for i, (feat_a, feat_v, y) in enumerate(train_dataloader):
+        feat_a = feat_a.float()
+        feat_v = feat_v.float()
+        model_fp32_prepared(feat_a,feat_v)
 
     # Convert the observed model to a quantized model. This does several things:
     # quantizes the weights, computes and stores the scale and bias value to be
