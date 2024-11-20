@@ -39,6 +39,8 @@ from helper_functions import set_seed, __shuffle_pick_quarter_data__, save_check
 from helper_functions import AverageMeter, ProgressMeter
 from audio_helper_functions import _resample_if_necessary, _cut_if_necessary, _right_pad_if_necessary, _mix_down_if_necessary
 
+#quantification net
+from tool.quantification import quantification_net
 
 class AVDataset(Dataset):
     def __init__(self, x_a, x_v, y, n_samples):
@@ -81,7 +83,7 @@ if __name__ == '__main__':
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name',
-                        default='baseline_0001.pth',
+                        default='baseline_0051.pth',
                         type=str,
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
@@ -89,7 +91,7 @@ if __name__ == '__main__':
                         metavar='N',
                         )
 
-    parser.add_argument('--batch_size', default=32, type=int,
+    parser.add_argument('--batch_size', default=64, type=int,
                         metavar='N',
                         )
 
@@ -111,8 +113,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default=1e-5, type=float,
                         metavar='learning rate',
                         )
-    parser.add_argument('--test_matric', action='store_true'
-                        )
+    parser.add_argument('--test_matric', default=True, type=bool, help="Set to Ture to get floap and fps if needed")
+    parser.add_argument('--execute_quantification', default=True, type=bool, help="Set to Ture to quantify if needed")
 
     args = parser.parse_args()
 
@@ -126,6 +128,7 @@ if __name__ == '__main__':
     lr = args.lr
     test_matric = args.test_matric
     trained_epoch = 0
+    quantified = args.execute_quantification
 
 
     ##################################################################################################
@@ -561,7 +564,8 @@ if __name__ == '__main__':
 
             return out
     # ############### Optimiser and Loss Function ################
-    model = AVStutterNet().to(device)
+    model = AVStutterNet()
+    # print(model)
     print('Number of Trainable parameters', sum(p.numel()for p in model.parameters()))
     class_loss_criterion =nn.CrossEntropyLoss()
     sim_loss_criterion   = nn.CosineEmbeddingLoss(margin=0.5)
@@ -729,49 +733,64 @@ if __name__ == '__main__':
             trained_epoch = checkpoint['epoch']
 
 
+    if not quantified:
+        model = model.to(device)
+        for epoch  in range(trained_epoch, num_epochs + trained_epoch):
+            print('Inside Epoch : ', epoch )
 
-    for epoch  in range(trained_epoch, num_epochs + trained_epoch):
-        print('Inside Epoch : ', epoch )
+            # train for one epoch
+            overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch)
 
-        # train for one epoch
-        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch)
-
-        # average loss through all iterations --> Avg loss of an epoch
-        overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
-        class_loss_epoch = sum(class_loss_list)/len(class_loss_list)
-        class_acc_epoch = sum(class_acc_train)/len(class_acc_train)
-        wandb.log({"Overall Loss/train": overall_loss_epoch, "epoch": epoch})
-        wandb.log({"Class Loss/train": class_loss_epoch, "epoch": epoch})
-        wandb.log({"Accuracy/train": class_acc_epoch, "epoch": epoch})
-
-
-
-        ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, optimizer, epoch)
-        wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
-        wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
+            # average loss through all iterations --> Avg loss of an epoch
+            overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
+            class_loss_epoch = sum(class_loss_list)/len(class_loss_list)
+            class_acc_epoch = sum(class_acc_train)/len(class_acc_train)
+            wandb.log({"Overall Loss/train": overall_loss_epoch, "epoch": epoch})
+            wandb.log({"Class Loss/train": class_loss_epoch, "epoch": epoch})
+            wandb.log({"Accuracy/train": class_acc_epoch, "epoch": epoch})
 
 
-        ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion, optimizer, epoch)
-        # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
-        wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
-        wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
-        wandb.log({"F1/test": f1_score_test, "epoch": epoch})
 
-        test_acc_list[epoch - trained_epoch] = class_acc_test
-        test_f1_list[epoch - trained_epoch] = f1_score_test
+            ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
+            class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, optimizer, epoch)
+            wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
+            wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
 
 
-    save_checkpoint({
-        'epoch': num_epochs + trained_epoch + 1,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict' : optimizer.state_dict(),
-    }, filename=model_chkpt_pth +'baseline_{:04d}.pth'.format(epoch))
+            ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
+            class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion, optimizer, epoch)
+            # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
+            wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
+            wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
+            wandb.log({"F1/test": f1_score_test, "epoch": epoch})
 
-    if test_matric:
-        matric_FPS(test_dataloader, model)
-        matric_flop(test_dataloader, model)
+            test_acc_list[epoch - trained_epoch] = class_acc_test
+            test_f1_list[epoch - trained_epoch] = f1_score_test
+
+
+        save_checkpoint({
+            'epoch': num_epochs + trained_epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict' : optimizer.state_dict(),
+        }, filename=model_chkpt_pth +'baseline_{:04d}.pth'.format(num_epochs + trained_epoch))
+
+        if test_matric:
+            matric_FPS(test_dataloader, model)
+            matric_flop(test_dataloader, model)
+    else:
+        quantified_net = None
+        for i,(feat_a, feat_v, y) in enumerate(train_dataloader) :
+            feat_a = feat_a.float()
+            feat_v = feat_v.float()
+            quantified_net = quantification_net(model,feat_a, feat_v)
+            matric_FPS(train_dataloader, model)
+            matric_flop(train_dataloader, model)
+            break
+
+        save_checkpoint({
+            'model_state_dict': quantified_net.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }, filename=model_chkpt_pth + 'quantified_net.pth')
 
 wandb.finish()
 
