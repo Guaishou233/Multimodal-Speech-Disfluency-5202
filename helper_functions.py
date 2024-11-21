@@ -1,3 +1,5 @@
+import io
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,7 +85,7 @@ def __shuffle_pick_quarter_data__ (x_f, y_f, x_s, y_s) :
 
 
 def save_checkpoint(state, filename='checkpoint.pth'):
-    torch.save(state, filename)
+        torch.save(state, filename)
 
 
 ##################################################################################################

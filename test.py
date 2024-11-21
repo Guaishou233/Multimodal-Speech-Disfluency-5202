@@ -3,7 +3,7 @@ Author : Payal Mohapatra
 Contact : PayalMohapatra2026@u.northwestern.edu
 Project : Efficient Multimodal Disfluency Detection
 '''
-
+import io
 
 import torch
 import torch.nn as nn
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchaudio
 from cffi.model import qualify
+from torch.ao.quantization import get_default_qconfig, prepare_qat
 from torchsampler import ImbalancedDatasetSampler
 import sys
 # sys.path.append('/home/payal/multimodal_speech/main_codebase/')
@@ -84,11 +85,11 @@ if __name__ == '__main__':
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name',
-                        default='baseline_0051.pth',
+                        default='baseline_0053.pth',
                         type=str,
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
-    parser.add_argument('--num_epochs', default=50, type=int,
+    parser.add_argument('--num_epochs', default=1, type=int,
                         metavar='N',
                         )
 
@@ -130,6 +131,7 @@ if __name__ == '__main__':
     test_matric = args.test_matric
     trained_epoch = 0
     quantified = args.execute_quantification
+    base_name = args.model_name.rsplit('_', 1)[0]
 
 
     ##################################################################################################
@@ -388,10 +390,7 @@ if __name__ == '__main__':
             Arguments:
                 x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
             """
-            if quantified:
-                x = x + self.pe[:x.size(0)].to("cpu")
-            else:
-                x = x + self.pe[:x.size(0)].to(device)
+            x = x + self.pe[:x.size(0)].to(device)
             return self.dropout(x)
 
 
@@ -416,22 +415,13 @@ if __name__ == '__main__':
             if self.training and self.p > 0:
                 # Draw a random number from a Bernoulli distribution
                 # mask = torch.bernoulli(self.p).to(device)
-                if quantified:
-                    mask = torch.bernoulli(torch.ones(1) * self.p).to('cpu')
-                    if (mask == 0).all():
-                        print('Dropping Video')
-                    # mask = torch.bernoulli()
-                    x = x.to('cpu')
-                    x = x * mask
-                    x = x.to('cpu')
-                else:
-                    mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
-                    if (mask == 0).all():
-                        print('Dropping Video')
-                    # mask = torch.bernoulli()
-                    x = x.to(device)
-                    x = x * mask
-                    x = x.to(device)
+                mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
+                if (mask == 0).all():
+                    print('Dropping Video')
+                # mask = torch.bernoulli()
+                x = x.to(device)
+                x = x * mask
+                x = x.to(device)
             return x
 
 
@@ -670,7 +660,7 @@ if __name__ == '__main__':
         return overall_loss_list, class_loss_list, class_acc_list
 
 
-    def evaluate_one_epoch(valid_loader, model, class_loss_criterion, optimizer, epoch):
+    def evaluate_one_epoch(valid_loader, model, class_loss_criterion, optimizer, epoch,device):
         ## Assume there is no mini-batch in validation
         ## Batch Size is same as length of all samples
         with torch.no_grad():
@@ -747,59 +737,52 @@ if __name__ == '__main__':
             trained_epoch = checkpoint['epoch']
 
 
-    if not quantified:
-        model = model.to(device)
-        for epoch  in range(trained_epoch, num_epochs + trained_epoch):
-            print('Inside Epoch : ', epoch )
+    model = model.to(device)
+    model.qconfig = get_default_qconfig('qnnpack')
+    model = prepare_qat(model, inplace=True)
+    for epoch  in range(trained_epoch, num_epochs + trained_epoch):
+        print('Inside Epoch : ', epoch )
 
-            # train for one epoch
-            overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch)
+        # train for one epoch
+        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch)
 
-            # average loss through all iterations --> Avg loss of an epoch
-            overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
-            class_loss_epoch = sum(class_loss_list)/len(class_loss_list)
-            class_acc_epoch = sum(class_acc_train)/len(class_acc_train)
-            wandb.log({"Overall Loss/train": overall_loss_epoch, "epoch": epoch})
-            wandb.log({"Class Loss/train": class_loss_epoch, "epoch": epoch})
-            wandb.log({"Accuracy/train": class_acc_epoch, "epoch": epoch})
-
-
-
-            ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-            class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, optimizer, epoch)
-            wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
-            wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
+        # average loss through all iterations --> Avg loss of an epoch
+        overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
+        class_loss_epoch = sum(class_loss_list)/len(class_loss_list)
+        class_acc_epoch = sum(class_acc_train)/len(class_acc_train)
+        wandb.log({"Overall Loss/train": overall_loss_epoch, "epoch": epoch})
+        wandb.log({"Class Loss/train": class_loss_epoch, "epoch": epoch})
+        wandb.log({"Accuracy/train": class_acc_epoch, "epoch": epoch})
 
 
-            ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-            class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion, optimizer, epoch)
-            # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
-            wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
-            wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
-            wandb.log({"F1/test": f1_score_test, "epoch": epoch})
 
-            test_acc_list[epoch - trained_epoch] = class_acc_test
-            test_f1_list[epoch - trained_epoch] = f1_score_test
+        ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
+        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, optimizer, epoch)
+        wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
+        wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
 
 
-        save_checkpoint({
-            'epoch': num_epochs + trained_epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict' : optimizer.state_dict(),
-        }, filename=model_chkpt_pth +'baseline_{:04d}.pth'.format(num_epochs + trained_epoch))
+        ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
+        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion, optimizer, epoch,device)
+        # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
+        wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
+        wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
+        wandb.log({"F1/test": f1_score_test, "epoch": epoch})
 
-        if test_matric:
-            matric_FPS(test_dataloader, model,device)
-            matric_flop(test_dataloader, model,device)
-    else:
-        quantified_net = quantification_net(model,train_dataloader)
-        # matric_FPS(train_dataloader, quantified_net.to("cpu"),"cpu")
-        # matric_flop(train_dataloader, quantified_net.to("cpu"),"cpu")
+        test_acc_list[epoch - trained_epoch] = class_acc_test
+        test_f1_list[epoch - trained_epoch] = f1_score_test
 
-        save_checkpoint({
-            'model_state_dict': quantified_net.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, filename=model_chkpt_pth + 'quantified_net.pth')
+
+    save_checkpoint({
+        'epoch': num_epochs + trained_epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict' : optimizer.state_dict(),
+    }, filename=model_chkpt_pth +f'{base_name}{num_epochs + trained_epoch:04d}.pth')
+
+    if test_matric:
+        matric_FPS(test_dataloader, model,device)
+        matric_flop(test_dataloader, model,device)
+
 
 wandb.finish()
 
