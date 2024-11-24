@@ -6,6 +6,7 @@ Project : Efficient Multimodal Disfluency Detection
 import io
 
 import torch
+import torch.nn.utils.prune as prune
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -410,14 +411,26 @@ if __name__ == '__main__':
     ##################################################################################################
     # Prepare the audio data using wav2vec2 features
     ##################################################################################################
-    bundle = torchaudio.pipelines.WAV2VEC2_BASE
-    model_wav2vec = bundle.get_model().to(device)
+    bundle = torchaudio.pipelines.HUBERT_BASE
+    hubert_model = bundle.get_model() #model_wav2vec hubert_model
+    for name, module in hubert_model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            prune.l1_unstructured(module, name="weight", amount=0.3)
+
+    hubert_model = hubert_model.to(device)
     def __extract_audio_feat__(signal, sr=16000) :
         signal = _resample_if_necessary(signal, sr)
         signal = _mix_down_if_necessary(signal)
         signal = _cut_if_necessary(signal)
         signal = _right_pad_if_necessary(signal)
-        audio_feat, _ = model_wav2vec(signal.to(device))
+        torch.cuda.synchronize()
+        start = time.time()
+        audio_feat, _ = hubert_model(signal.to(device))
+        torch.cuda.synchronize()
+        end = time.time()
+        audio_extra_each = end - start
+        print('Prepare the audio data features spent time:', audio_extra_each)
+        wandb.log({'Prepare the audio data features spent time': audio_extra_each})
         if audio_feat.shape[0] > 1 : # handle multi-channel audio
             audio_feat = torch.mean(audio_feat, dim=0, keepdim=True)
             audio_feat = audio_feat.unsqueeze(0)
