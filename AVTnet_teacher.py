@@ -12,6 +12,7 @@ import torch.optim as optim
 import torchaudio
 from cffi.model import qualify
 from torch.ao.quantization import get_default_qconfig, prepare_qat
+from torch.nn.utils import prune
 from torchsampler import ImbalancedDatasetSampler
 import sys
 # sys.path.append('/home/payal/multimodal_speech/main_codebase/')
@@ -85,11 +86,11 @@ if __name__ == '__main__':
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name',
-                        default='baseline_0053.pth',
+                        default='teacher_0000.pth',
                         type=str,
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
-    parser.add_argument('--num_epochs', default=1, type=int,
+    parser.add_argument('--num_epochs', default=100, type=int,
                         metavar='N',
                         )
 
@@ -115,8 +116,14 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default=1e-5, type=float,
                         metavar='learning rate',
                         )
+
+    parser.add_argument('--pruning', default=True, type=bool,
+                        metavar='pruning or not',
+                        )
+
     parser.add_argument('--test_matric', default=True, type=bool, help="Set to Ture to get floap and fps if needed")
     parser.add_argument('--execute_quantification', default=True, type=bool, help="Set to Ture to quantify if needed")
+
 
     args = parser.parse_args()
 
@@ -130,6 +137,7 @@ if __name__ == '__main__':
     lr = args.lr
     test_matric = args.test_matric
     trained_epoch = 0
+    pruning = args.pruning
     quantified = args.execute_quantification
     base_name = args.model_name.rsplit('_', 1)[0]
 
@@ -166,6 +174,7 @@ if __name__ == '__main__':
             "seed_num": args.seed_num,
             "p_mask": args.p_mask,
             "lr": args.lr,
+            "pruning": args.pruning,
             "test_matric" : args.test_matric
         },
     )
@@ -205,14 +214,30 @@ if __name__ == '__main__':
     ##################################################################################################
     # Prepare the audio data using wav2vec2 features
     ##################################################################################################
-    bundle = torchaudio.pipelines.WAV2VEC2_BASE
-    model_wav2vec = bundle.get_model().to(device)
+    # bundle = torchaudio.pipelines.WAV2VEC2_BASE
+    # model_wav2vec = bundle.get_model().to(device)
+
+    bundle = torchaudio.pipelines.HUBERT_BASE
+    model_extra_audio = bundle.get_model()  # model_wav2vec hubert_model
+    if pruning:
+        for name, module in model_extra_audio.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                prune.l1_unstructured(module, name="weight", amount=0.3)
+
+    model_extra_audio.to(device)
     def __extract_audio_feat__(signal, sr=16000) :
         signal = _resample_if_necessary(signal, sr)
         signal = _mix_down_if_necessary(signal)
         signal = _cut_if_necessary(signal)
         signal = _right_pad_if_necessary(signal)
-        audio_feat, _ = model_wav2vec(signal.to(device))
+        torch.cuda.synchronize()
+        start = time.time()
+        audio_feat, _ = model_extra_audio(signal.to(device))
+        torch.cuda.synchronize()
+        end = time.time()
+        audio_extra_each = end - start
+        wandb.log({'Prepare the audio data features spent time': audio_extra_each})
+        audio_feat, _ = model_extra_audio(signal.to(device))
         if audio_feat.shape[0] > 1 : # handle multi-channel audio
             audio_feat = torch.mean(audio_feat, dim=0, keepdim=True)
             audio_feat = audio_feat.unsqueeze(0)
@@ -510,7 +535,7 @@ if __name__ == '__main__':
             x_v =self.ln0_v(x_v)
 
             ######### AUDIO feature summarization #########
-            if (len(x_a.shape) == 3):
+            if len(x_a.shape) == 3:
                 x_a = x_a.unsqueeze(1)
             out_a = self.layer1_a(x_a)
             out_a = self.layer1_bn_a(out_a)
@@ -531,7 +556,7 @@ if __name__ == '__main__':
             out_a = out_a.squeeze(1)
 
             ######### VIDEO feature summarization #########
-            if (len(x_v.shape) == 3):
+            if len(x_v.shape) == 3:
                 x_v = x_v.unsqueeze(1)
             out_v = self.layer1_v(x_v)
             out_v = self.layer1_bn_v(out_v)
@@ -587,7 +612,7 @@ if __name__ == '__main__':
     # Training and Evaluation
     ##################################################################################################
     from helper_functions import AverageMeter, ProgressMeter
-    def train_one_epoch(train_loader, model, class_loss_criterion, optimizer, epoch):
+    def train_one_epoch(train_loader, model, class_loss_criterion, optimizer, epoch,device):
         sim_loss_list = np.zeros(len(train_loader))
         ce_loss_list = np.zeros(len(train_loader))
         class_loss_list = np.zeros(len(train_loader))
@@ -660,7 +685,7 @@ if __name__ == '__main__':
         return overall_loss_list, class_loss_list, class_acc_list
 
 
-    def evaluate_one_epoch(valid_loader, model, class_loss_criterion, optimizer, epoch,device):
+    def evaluate_one_epoch(valid_loader, model, class_loss_criterion,device):
         ## Assume there is no mini-batch in validation
         ## Batch Size is same as length of all samples
         with torch.no_grad():
@@ -738,13 +763,11 @@ if __name__ == '__main__':
 
 
     model = model.to(device)
-    model.qconfig = get_default_qconfig('qnnpack')
-    model = prepare_qat(model, inplace=True)
     for epoch  in range(trained_epoch, num_epochs + trained_epoch):
         print('Inside Epoch : ', epoch )
 
         # train for one epoch
-        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch)
+        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model, class_loss_criterion, optimizer, epoch,device)
 
         # average loss through all iterations --> Avg loss of an epoch
         overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
@@ -757,13 +780,13 @@ if __name__ == '__main__':
 
 
         ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, optimizer, epoch)
+        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model, class_loss_criterion, device)
         wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
         wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
 
 
         ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion, optimizer, epoch,device)
+        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model, class_loss_criterion,device)
         # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
         wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
         wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
