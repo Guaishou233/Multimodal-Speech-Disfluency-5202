@@ -6,7 +6,7 @@
 
 ## Overview
 
-Traditional methods for detecting speech disfluencies often rely solely on acoustic data. This paper introduces a novel multimodal approach that incorporates both audio and video modalities for more robust disfluency detection. We propose a unified weight-sharing encoder framework that handles temporal and semantic context fusion, designed to accommodate scenarios where video data may be missing during inference. Experimental results across five disfluency detection tasks demonstrate significant performance gains compared to unimodal methods, achieving an average absolute improvement of 10% when both modalities are consistently available, and 7% even when video data is missing in half of the samples.
+Traditional methods for detecting speech disfluencies often rely solely on acoustic data. This paper introduces a novel multimodal approach that incorporates both audio and video modalities for more robust disfluency detection. We propose a unified weight-sharing encoder_student framework that handles temporal and semantic context fusion, designed to accommodate scenarios where video data may be missing during inference. Experimental results across five disfluency detection tasks demonstrate significant performance gains compared to unimodal methods, achieving an average absolute improvement of 10% when both modalities are consistently available, and 7% even when video data is missing in half of the samples.
 
 ![System Diagram](utils/Interspeech_overall.drawio_annoated.png)
 

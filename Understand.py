@@ -350,9 +350,9 @@
 #         return self.dropout(x)
 #
 #
-# class encoder(nn.Module):
+# class encoder_student(nn.Module):
 #     def __init__(self, d_model, device):  # FIXME
-#         super(encoder, self).__init__()
+#         super(encoder_student, self).__init__()
 #         encoder_layer = nn.TransformerEncoderLayer(d_model,
 #                                                    nhead=32)  ## README: d_model is the "f" in forward function of class network
 #         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
@@ -420,7 +420,7 @@
 #         )
 #         self.layer1_bn_v = nn.BatchNorm2d(1)
 #
-#         self.tf_encoder = encoder(self.fc_dim, device)
+#         self.tf_encoder = encoder_student(self.fc_dim, device)
 #
 #         self.norm1D_a = nn.LayerNorm(self.fc_dim)
 #         self.norm1D_v = nn.LayerNorm(self.fc_dim)
@@ -473,8 +473,8 @@
 #         # squeeze out_a
 #         out_a = out_a.squeeze(1)
 #
-#         ########## AUDIO through common temporal encoder ##########
-#         ### Call the temporal learning module : TF encoder
+#         ########## AUDIO through common temporal encoder_student ##########
+#         ### Call the temporal learning module : TF encoder_student
 #         # Current input -- B,T,F
 #         # Expected input -- T,B,F
 #         out_a = out_a.permute(1, 0, 2)
@@ -498,8 +498,8 @@
 #         if (x_v == 0.0).all():
 #             out_v = out_a
 #         else:
-#             ########## VIDEO through common temporal encoder ##########
-#             ### Call the temporal learning module : TF encoder
+#             ########## VIDEO through common temporal encoder_student ##########
+#             ### Call the temporal learning module : TF encoder_student
 #             # Current input -- B,T,F
 #             # Expected input -- T,B,F
 #
@@ -800,9 +800,9 @@
 # #         return self.dropout(x)
 # #
 # #
-# # class encoder(nn.Module):
+# # class encoder_student(nn.Module):
 # #     def __init__(self, d_model, device):  # FIXME
-# #         super(encoder, self).__init__()
+# #         super(encoder_student, self).__init__()
 # #         encoder_layer = nn.TransformerEncoderLayer(d_model,
 # #                                                    nhead=32)  ## README: d_model is the "f" in forward function of class network
 # #         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
@@ -870,7 +870,7 @@
 # #         )
 # #         self.layer1_bn_v = nn.BatchNorm2d(1)
 # #
-# #         self.tf_encoder = encoder(self.fc_dim, device)
+# #         self.tf_encoder = encoder_student(self.fc_dim, device)
 # #
 # #         self.norm1D_a = nn.LayerNorm(self.fc_dim)
 # #         self.norm1D_v = nn.LayerNorm(self.fc_dim)
@@ -923,8 +923,8 @@
 # #         # squeeze out_a
 # #         out_a = out_a.squeeze(1)
 # #
-# #         ########## AUDIO through common temporal encoder ##########
-# #         ### Call the temporal learning module : TF encoder
+# #         ########## AUDIO through common temporal encoder_student ##########
+# #         ### Call the temporal learning module : TF encoder_student
 # #         # Current input -- B,T,F
 # #         # Expected input -- T,B,F
 # #         out_a = out_a.permute(1, 0, 2)
@@ -948,8 +948,8 @@
 # #         if (x_v == 0.0).all():
 # #             out_v = out_a
 # #         else:
-# #             ########## VIDEO through common temporal encoder ##########
-# #             ### Call the temporal learning module : TF encoder
+# #             ########## VIDEO through common temporal encoder_student ##########
+# #             ### Call the temporal learning module : TF encoder_student
 # #             # Current input -- B,T,F
 # #             # Expected input -- T,B,F
 # #

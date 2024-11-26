@@ -3,22 +3,12 @@ Author : Payal Mohapatra
 Contact : PayalMohapatra2026@u.northwestern.edu
 Project : Efficient Multimodal Disfluency Detection
 '''
-import io
-
-import torch
 import torch.nn.utils.prune as prune
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import torchaudio
-from cffi.model import qualify
-from torch.ao.quantization import QuantStub, DeQuantStub
 from torch.cuda import device
-from torchsampler import ImbalancedDatasetSampler
 import sys
-# sys.path.append('/home/payal/multimodal_speech/main_codebase/')
-import matplotlib.pyplot as plt
-import IPython.display as ipd
 
 import time
 from thop import profile
@@ -29,7 +19,6 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import os
 import wandb
 import random
@@ -40,12 +29,9 @@ from sklearn.metrics import f1_score, balanced_accuracy_score
 
 # Custom functions
 from helper_functions import set_seed, __shuffle_pick_quarter_data__, save_checkpoint
-from helper_functions import AverageMeter, ProgressMeter
 from audio_helper_functions import _resample_if_necessary, _cut_if_necessary, _right_pad_if_necessary, _mix_down_if_necessary
-from AVTnet_teacher import encoder, AVStutterNet
+from AVTnet_teacher import  AVStutterNet
 
-#quantification net
-from tool.quantification import quantification_net
 
 class AVDataset(Dataset):
     def __init__(self, x_a, x_v, y, n_samples):
@@ -64,45 +50,45 @@ class AVDataset(Dataset):
     def __len__(self):
         return self.n_samples
 
-# class PositionalEncoding(nn.Module):
-#     # def __init__(self, d_model, dropout, max_len):
-#     # def __init__(self, device, d_model, dropout=0.0):
-#     def __init__(self, d_model, dropout=0.0):
-#         super().__init__()
-#         self.dropout = nn.Dropout(p=dropout)
-#         max_len = 90
-#         # max_len = 376 # FIXME :: UPdeate in the class definitions
-#         position = torch.arange(max_len).unsqueeze(1)
-#         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-#         pe = torch.zeros(max_len, 1, d_model)
-#         # (L, N, F)
-#         pe[:, 0, 0::2] = torch.sin(position * div_term)
-#         pe[:, 0, 1::2] = torch.cos(position * div_term)
-#         self.register_buffer('pe', pe)
-#     # def forward(self, x, device):
-#     def forward(self, x):
-#         """
-#         Arguments:
-#             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
-#         """
-#         # x = x + self.pe[:x.size(0)].to(device)
-#         x = x + self.pe[:x.size(0)]
-#         return self.dropout(x)
-#
-#
-# class encoder(nn.Module):
-#     # def __init__(self, d_model, device): #FIXME
-#     def __init__(self, d_model): #FIXME
-#         super(encoder, self).__init__()
-#         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=32) ## README: d_model is the "f" in forward function of class network
-#         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2) ## num_layers is same as N in the transformer figure in the transformer paper
-#         # self.positional_encoding = PositionalEncoding(device,d_model)
-#         self.positional_encoding = PositionalEncoding(d_model)
-#     def forward(self, tgt):
-#         # tgt = self.positional_encoding(tgt, device) ##for positional encoding
-#         tgt = self.positional_encoding(tgt) ##for positional encoding
-#         out = self.transformer_encoder(tgt) ##when masking not required, just remove mask=tgt_mask
-#         return out
+class PositionalEncoding_student(nn.Module):
+    # def __init__(self, d_model, dropout, max_len):
+    # def __init__(self, device, d_model, dropout=0.0):
+    def __init__(self, d_model, dropout=0.0):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        max_len = 90
+        # max_len = 376 # FIXME :: UPdeate in the class definitions
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        # (L, N, F)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+    # def forward(self, x, device):
+    def forward(self, x):
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        # x = x + self.pe[:x.size(0)].to(device)
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
+
+class encoder_student(nn.Module):
+    # def __init__(self, d_model, device): #FIXME
+    def __init__(self, d_model): #FIXME
+        super(encoder_student, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=32) ## README: d_model is the "f" in forward function of class network
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2) ## num_layers is same as N in the transformer figure in the transformer paper
+        # self.positional_encoding = PositionalEncoding(device,d_model)
+        self.positional_encoding = PositionalEncoding_student(d_model)
+    def forward(self, tgt):
+        # tgt = self.positional_encoding(tgt, device) ##for positional encoding
+        tgt = self.positional_encoding(tgt) ##for positional encoding
+        out = self.transformer_encoder(tgt) ##when masking not required, just remove mask=tgt_mask
+        return out
 
 
 class RandomMasking(nn.Module,device):
@@ -144,8 +130,6 @@ class AVStutterNet_student(nn.Module):
 
         # self.ln0 = nn.LayerNorm(self.fc_dim)
         self.ln0_a = nn.LayerNorm(self.fc_dim * 2)
-        self.ln0_v = nn.LayerNorm(self.fc_dim * 2)
-
 
         # Feature summarization -- audio
         self.layer1_a = nn.Sequential(
@@ -157,20 +141,10 @@ class AVStutterNet_student(nn.Module):
 
         self.layer1_bn_a = nn.BatchNorm2d(1)
 
-        # Feature summarization -- video
-        self.layer1_v = nn.Sequential(
-            torch.nn.Conv2d(in_channels = 1, out_channels = 1, kernel_size=3, stride=1, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(kernel_size=2, stride=2),
-            torch.nn.Dropout(p=0.5)
-        )
-        self.layer1_bn_v = nn.BatchNorm2d(1)
-
-        self.tf_encoder = encoder(self.fc_dim)
-        # self.tf_encoder = encoder(self.fc_dim, device)
+        self.tf_encoder = encoder_student(self.fc_dim)
+        # self.tf_encoder = encoder_student(self.fc_dim, device)
 
         self.norm1D_a = nn.LayerNorm(self.fc_dim)
-        self.norm1D_v = nn.LayerNorm(self.fc_dim)
         self.norm1D_f = nn.LayerNorm(self.fc_dim)
 
         self.clf_head = nn.Sequential(
@@ -202,14 +176,13 @@ class AVStutterNet_student(nn.Module):
         # if len(x_mix.shape) == 4:
         x_mix = x_mix.squeeze(1)
 
-        x_a, x_v = torch.split(x_mix, [149, 90], dim=1)
+        x_a, _ = torch.split(x_mix, [149, 90], dim=1)
 
         x_a = x_a.unsqueeze(1)
 
         ########## Project audio to same temporal dimension and fuse ##########
         x_a = x_a.squeeze(1)
         x_a = self.temporal_summarization_a(x_a)
-
         x_a = self.ln0_a(x_a)
 
         ######### AUDIO feature summarization #########
@@ -219,8 +192,8 @@ class AVStutterNet_student(nn.Module):
         # squeeze out_a
         out_a = out_a.squeeze(1)
 
-        ########## AUDIO through common temporal encoder ##########
-        ### Call the temporal learning module : TF encoder
+        ########## AUDIO through common temporal encoder_student ##########
+        ### Call the temporal learning module : TF encoder_student
         # Current input -- B,T,F
         # Expected input -- T,B,F
         out_a = out_a.permute(1, 0, 2)
@@ -267,12 +240,12 @@ if __name__ == '__main__':
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name_student',
-                        default='baseline_0053.pth',
+                        default='student_0053.pth',
                         type=str,
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name_teacher',
-                        default='baseline_0053.pth',
+                        default='teacher_0001.pth',
                         type=str,
                         metavar='N',
                         help='which checkpoint do you wanna use to extract embeddings?')
@@ -310,6 +283,15 @@ if __name__ == '__main__':
                         metavar='hard_loss weight',
                         )
 
+    parser.add_argument('--pruning', default=True, type=bool,
+                        metavar='pruning or not',
+                        )
+
+    parser.add_argument('--extract_model', default="wav2vec", type=str,
+                        metavar='audio extract model',
+                        ) #wav2vec hubert
+
+
     parser.add_argument('--test_matric', default=True, type=bool, help="Set to Ture to get floap and fps if needed")
     parser.add_argument('--execute_quantification', default=True, type=bool, help="Set to Ture to quantify if needed")
 
@@ -328,7 +310,10 @@ if __name__ == '__main__':
     alpha = args.alpha
     test_matric = args.test_matric
     trained_epoch = 0
-    base_name = args.model_name.rsplit('_', 1)[0]
+    pruning = args.pruning
+    extract_model = args.extract_model
+    base_name_student = args.model_name_student.rsplit('_', 1)[0]
+    base_name_teacher = args.model_name_teacher.rsplit('_', 1)[0]
 
 
     ##################################################################################################
@@ -365,7 +350,11 @@ if __name__ == '__main__':
             "lr": args.lr,
             "temp": args.temp,
             "alpha": args.alpha,
-            "test_matric" : args.test_matric
+            "test_matric" : args.test_matric,
+            "pruning": args.pruning,
+            "extract_model": args.extract_model,
+            "target_file_teacher" : args.model_name_teacher,
+            "target_file_student" : args.model_name_student,
         },
     )
     ##################################################################################################
@@ -422,7 +411,6 @@ if __name__ == '__main__':
         torch.cuda.synchronize()
         end = time.time()
         audio_extra_each = end - start
-        print('Prepare the audio data features spent time:', audio_extra_each)
         wandb.log({'Prepare the audio data features spent time': audio_extra_each})
         if audio_feat.shape[0] > 1 : # handle multi-channel audio
             audio_feat = torch.mean(audio_feat, dim=0, keepdim=True)
@@ -648,7 +636,7 @@ if __name__ == '__main__':
             )
 
 
-            loss = alpha * class_output + (1-alpha) * distillation_loss
+            loss = alpha * loss_class_iter + (1-alpha) * distillation_loss
 
             ## Compute the accuracy per batch
             _, predicted_labels = torch.max(class_output.data, 1)
@@ -692,7 +680,7 @@ if __name__ == '__main__':
         return overall_loss_list, class_loss_list, class_acc_list
 
 
-    def evaluate_one_epoch(valid_loader, model, class_loss_criterion, optimizer, epoch,device):
+    def evaluate_one_epoch(valid_loader, model, class_loss_criterion,device):
         ## Assume there is no mini-batch in validation
         ## Batch Size is same as length of all samples
         with torch.no_grad():
@@ -763,24 +751,26 @@ if __name__ == '__main__':
     test_acc_list = np.zeros(num_epochs)
     test_f1_list = np.zeros(num_epochs)
 
-    trained_epoch = 0
+    trained_epoch_student = 0
     for filename in os.listdir(model_chkpt_pth):
         if filename.endswith(target_file_teacher):
-            checkpoint = torch.load(model_chkpt_pth + filename)
-            model_teacher.load_state_dict(checkpoint['model_state_dict'])
-            trained_epoch = checkpoint['epoch']
+            checkpoint_teacher = torch.load(model_chkpt_pth + filename)
+            model_teacher.load_state_dict(checkpoint_teacher['model_state_dict'])
+            trained_epoch_teacher = checkpoint_teacher['epoch']
         if filename.endswith(target_file_student):
-            checkpoint = torch.load(model_chkpt_pth + filename)
-            model_student.load_state_dict(checkpoint['model_state_dict'])
-            optimizer_student.load_state_dict(checkpoint['optimizer_state_dict'])
-            trained_epoch = checkpoint['epoch']
+            checkpoint_student = torch.load(model_chkpt_pth + filename)
+            model_student.load_state_dict(checkpoint_student['model_state_dict'])
+            optimizer_student.load_state_dict(checkpoint_student['optimizer_state_dict'])
+            trained_epoch_student = checkpoint_student['epoch']
 
 
-    for epoch  in range(trained_epoch, num_epochs + trained_epoch):
+    model_teacher.to(device)
+    model_student.to(device)
+    for epoch  in range(trained_epoch_student, num_epochs + trained_epoch_student):
         print('Inside Epoch : ', epoch )
 
         # train for one epoch
-        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader, model_teacher, class_loss_criterion, optimizer_student, epoch,device)
+        overall_loss_list, class_loss_list, class_acc_train = train_one_epoch(train_dataloader,model_student, model_teacher, class_loss_criterion, optimizer_student, epoch,device)
 
         # average loss through all iterations --> Avg loss of an epoch
         overall_loss_epoch = sum(overall_loss_list)/len(overall_loss_list)
@@ -793,13 +783,13 @@ if __name__ == '__main__':
 
 
         ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model_student, class_loss_criterion, optimizer_student, epoch,device)
+        class_loss_valid, class_acc_valid, _ = evaluate_one_epoch(valid_dataloader, model_student, class_loss_criterion,device)
         wandb.log({"Accuracy/valid": class_acc_valid, "epoch": epoch})
         wandb.log({"Class Loss/valid": class_loss_valid, "epoch": epoch})
 
 
         ## Evaluate every epoch for in-domain data in validation # FIXME :: Currently the valid and test sets are the same.
-        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model_student, class_loss_criterion, optimizer_student, epoch,device)
+        class_loss_test, class_acc_test, f1_score_test = evaluate_one_epoch(test_dataloader, model_student, class_loss_criterion,device)
         # print('End of Epoch', epoch, 'Test loss is','%.4f' % class_loss_test, '    Test accuracy is ', '%.4f' % class_acc_test, '    F1 score is ', '%.4f' % f1_score)
         wandb.log({"Accuracy/test": class_acc_test, "epoch": epoch})
         wandb.log({"Class Loss/test": class_loss_test, "epoch": epoch})
@@ -813,7 +803,7 @@ if __name__ == '__main__':
         'epoch': num_epochs + trained_epoch,
         'model_state_dict': model_student.state_dict(),
         'optimizer_state_dict' : optimizer_student.state_dict(),
-    }, filename=model_chkpt_pth +f'{base_name}{num_epochs + trained_epoch:04d}.pth')
+    }, filename=model_chkpt_pth +f'{base_name_student}_{num_epochs + trained_epoch:04d}.pth')
 
     if test_matric:
         matric_FPS(test_dataloader, model_student,device)

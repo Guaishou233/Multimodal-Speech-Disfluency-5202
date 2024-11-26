@@ -63,6 +63,195 @@ class AVDataset(Dataset):
         return self.n_samples
 
 
+class PositionalEncoding(nn.Module):
+    # def __init__(self, d_model, dropout, max_len):
+    def __init__(self, d_model, dropout=0.0):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        max_len = 90
+        # max_len = 376 # FIXME :: UPdeate in the class definitions
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        # (L, N, F)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+    def forward(self, x):
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = x + self.pe[:x.size(0)]
+        # x = x + self.pe[:x.size(0)].to(device)
+        return self.dropout(x)
+
+
+class encoder(nn.Module):
+    def __init__(self, d_model): #FIXME
+        super(encoder, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=32) ## README: d_model is the "f" in forward function of class network
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2) ## num_layers is same as N in the transformer figure in the transformer paper
+        self.positional_encoding = PositionalEncoding(d_model)
+    def forward(self, tgt):
+        tgt = self.positional_encoding(tgt) ##for positional encoding
+        out = self.transformer_encoder(tgt) ##when masking not required, just remove mask=tgt_mask
+        return out
+
+
+class RandomMasking(nn.Module):
+    def __init__(self, p=0.1):
+        super(RandomMasking, self).__init__()
+        self.p = p
+
+    def forward(self, x):
+        if self.training and self.p > 0:
+            # Draw a random number from a Bernoulli distribution
+            # mask = torch.bernoulli(self.p).to(device)
+            mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
+            if (mask == 0).all():
+                print('Dropping Video')
+            # mask = torch.bernoulli()
+            x = x.to(device)
+            x = x * mask
+            x = x.to(device)
+        return x
+
+
+############## UNIFIED FUSION ################
+class AVStutterNet(nn.Module):
+    def __init__(self):
+        super(AVStutterNet, self).__init__()
+        self.fc_dim = 768 // 2
+        # self.fc_dim_clf = 96 * 4
+
+
+        self.temporal_summarization_a = nn.Sequential(
+            nn.Conv1d(in_channels = 149, out_channels = 90, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=0.5)
+        )
+
+        # self.ln0 = nn.LayerNorm(self.fc_dim)
+        self.ln0_a = nn.LayerNorm(self.fc_dim * 2)
+        self.ln0_v = nn.LayerNorm(self.fc_dim * 2)
+
+
+        # Feature summarization -- audio
+        self.layer1_a = nn.Sequential(
+            torch.nn.Conv2d(in_channels = 1, out_channels = 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),
+            torch.nn.Dropout(p=0.5)
+        )
+
+        self.layer1_bn_a = nn.BatchNorm2d(1)
+
+        # Feature summarization -- video
+        self.layer1_v = nn.Sequential(
+            torch.nn.Conv2d(in_channels = 1, out_channels = 1, kernel_size=3, stride=1, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(kernel_size=2, stride=2),
+            torch.nn.Dropout(p=0.5)
+        )
+        self.layer1_bn_v = nn.BatchNorm2d(1)
+
+        self.tf_encoder = encoder(self.fc_dim)
+
+        self.norm1D_a = nn.LayerNorm(self.fc_dim)
+        self.norm1D_v = nn.LayerNorm(self.fc_dim)
+        self.norm1D_f = nn.LayerNorm(self.fc_dim)
+
+        self.clf_head = nn.Sequential(
+            nn.Linear(self.fc_dim, self.fc_dim // 2),
+            nn.LeakyReLU(),
+            nn.Linear(self.fc_dim // 2, self.fc_dim // 4),
+            nn.LeakyReLU(),
+            nn.Linear(self.fc_dim // 4, 2),
+            # nn.Softmax(dim=1)
+        )
+
+        # self.param_a = torch.nn.Parameter(torch.randn(768))
+        # self.param_v = torch.nn.Parameter(torch.randn(768))
+
+        # Create a learnable parameter with a constraint
+        self.param_a = torch.nn.Parameter(torch.randn(self.fc_dim), requires_grad=True)
+        # Set the constraint
+        self.param_a.register_hook(lambda grad: grad.clamp(min=0, max=1))
+
+        self.param_v = torch.nn.Parameter(torch.randn(self.fc_dim), requires_grad=True)
+        # Set the constraint
+        self.param_v.register_hook(lambda grad: grad.clamp(min=0, max=1))
+
+
+    def forward(self, x_mix):
+        x_mix = x_mix.squeeze(1)
+
+        x_a, x_v = torch.split(x_mix, [149, 90], dim=1)
+        x_a = self.temporal_summarization_a(x_a)
+
+        x_a =self.ln0_a(x_a)
+        x_v =self.ln0_v(x_v)
+
+        ######### AUDIO feature summarization #########
+        if len(x_a.shape) == 3:
+            x_a = x_a.unsqueeze(1)
+        out_a = self.layer1_a(x_a)
+        out_a = self.layer1_bn_a(out_a)
+        # squeeze out_a
+        out_a = out_a.squeeze(1)
+
+        ########## AUDIO through common temporal encoder_student ##########
+        ### Call the temporal learning module : TF encoder_student
+        # Current input -- B,T,F
+        # Expected input -- T,B,F
+        out_a = out_a.permute(1, 0, 2)
+        out_a = self.tf_encoder(out_a)
+        ## Permute back to B,T,F
+        out_a = out_a.permute(1, 0, 2)
+        ## Normalize out_a
+        out_a =  self.norm1D_a(out_a)
+        out_a = out_a.mean(1, keepdim=True)  ## Mean pool along the temporal axis
+        out_a = out_a.squeeze(1)
+
+        ######### VIDEO feature summarization #########
+        if len(x_v.shape) == 3:
+            x_v = x_v.unsqueeze(1)
+        out_v = self.layer1_v(x_v)
+        out_v = self.layer1_bn_v(out_v)
+        # squeeze out_v
+        out_v = out_v.squeeze(1)
+
+        ## Pass only if all x_v is not 0
+        if (x_v == 0.0).all():
+            out_v = out_a
+        else:
+            ########## VIDEO through common temporal encoder_student ##########
+            ### Call the temporal learning module : TF encoder_student
+            # Current input -- B,T,F
+            # Expected input -- T,B,F
+
+            out_v = out_v.permute(1, 0, 2)
+            out_v = self.tf_encoder(out_v)
+            ## Permute back to B,T,F
+            out_v = out_v.permute(1, 0, 2)
+            ## Normalize out_v
+            out_v =  self.norm1D_v(out_v)
+            out_v = out_v.mean(1, keepdim=True)  ## Mean pool along the temporal axis
+            out_v = out_v.squeeze(1)
+        ########## FUSE both the feature sets by adding ##########
+        out = self.param_a * out_a + self.param_v * out_v
+
+        # Normalise the fused feature
+        out = self.norm1D_f(out)
+        # unsqueeze the feature dimension
+        out = out.view(out.size(0), -1)
+        # print('Input data shape after view:', x.shape)
+        out = self.clf_head(out)
+
+
+        return out
+
 if __name__ == '__main__':
 
     ##################################################################################################
@@ -87,10 +276,10 @@ if __name__ == '__main__':
                         help='which checkpoint do you wanna use to extract embeddings?')
     parser.add_argument('--model_name',
                         default='teacher_0000.pth',
-                        type=str,
                         metavar='N',
+                        type=str,
                         help='which checkpoint do you wanna use to extract embeddings?')
-    parser.add_argument('--num_epochs', default=100, type=int,
+    parser.add_argument('--num_epochs', default=1, type=int,
                         metavar='N',
                         )
 
@@ -121,6 +310,10 @@ if __name__ == '__main__':
                         metavar='pruning or not',
                         )
 
+    parser.add_argument('--extract_model', default="wav2vec", type=str,
+                        metavar='audio extract model',
+                        ) #wav2vec hubert
+
     parser.add_argument('--test_matric', default=True, type=bool, help="Set to Ture to get floap and fps if needed")
     parser.add_argument('--execute_quantification', default=True, type=bool, help="Set to Ture to quantify if needed")
 
@@ -138,6 +331,7 @@ if __name__ == '__main__':
     test_matric = args.test_matric
     trained_epoch = 0
     pruning = args.pruning
+    extract_model = args.extract_model
     quantified = args.execute_quantification
     base_name = args.model_name.rsplit('_', 1)[0]
 
@@ -175,6 +369,7 @@ if __name__ == '__main__':
             "p_mask": args.p_mask,
             "lr": args.lr,
             "pruning": args.pruning,
+            "extract_model": args.extract_model,
             "test_matric" : args.test_matric
         },
     )
@@ -216,8 +411,10 @@ if __name__ == '__main__':
     ##################################################################################################
     # bundle = torchaudio.pipelines.WAV2VEC2_BASE
     # model_wav2vec = bundle.get_model().to(device)
-
-    bundle = torchaudio.pipelines.HUBERT_BASE
+    if extract_model == 'wav2vec':
+        bundle = torchaudio.pipelines.WAV2VEC2_BASE
+    else:
+        bundle = torchaudio.pipelines.HUBERT_BASE
     model_extra_audio = bundle.get_model()  # model_wav2vec hubert_model
     if pruning:
         for name, module in model_extra_audio.named_modules():
@@ -396,202 +593,7 @@ if __name__ == '__main__':
     ##################################################################################################
     feat_channel = 3
 
-    class PositionalEncoding(nn.Module):
-        # def __init__(self, d_model, dropout, max_len):
-        def __init__(self, device, d_model, dropout=0.0):
-            super().__init__()
-            self.dropout = nn.Dropout(p=dropout)
-            max_len = 90
-            # max_len = 376 # FIXME :: UPdeate in the class definitions
-            position = torch.arange(max_len).unsqueeze(1)
-            div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-            pe = torch.zeros(max_len, 1, d_model)
-            # (L, N, F)
-            pe[:, 0, 0::2] = torch.sin(position * div_term)
-            pe[:, 0, 1::2] = torch.cos(position * div_term)
-            self.register_buffer('pe', pe)
-        def forward(self, x, device):
-            """
-            Arguments:
-                x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
-            """
-            x = x + self.pe[:x.size(0)].to(device)
-            return self.dropout(x)
 
-
-    class encoder(nn.Module):
-        def __init__(self, d_model, device): #FIXME
-            super(encoder, self).__init__()
-            encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=32) ## README: d_model is the "f" in forward function of class network
-            self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2) ## num_layers is same as N in the transformer figure in the transformer paper
-            self.positional_encoding = PositionalEncoding(device,d_model)
-        def forward(self, tgt):
-            tgt = self.positional_encoding(tgt, device) ##for positional encoding
-            out = self.transformer_encoder(tgt) ##when masking not required, just remove mask=tgt_mask
-            return out
-
-
-    class RandomMasking(nn.Module):
-        def __init__(self, p=0.1):
-            super(RandomMasking, self).__init__()
-            self.p = p
-
-        def forward(self, x):
-            if self.training and self.p > 0:
-                # Draw a random number from a Bernoulli distribution
-                # mask = torch.bernoulli(self.p).to(device)
-                mask = torch.bernoulli(torch.ones(1) * self.p).to(device)
-                if (mask == 0).all():
-                    print('Dropping Video')
-                # mask = torch.bernoulli()
-                x = x.to(device)
-                x = x * mask
-                x = x.to(device)
-            return x
-
-
-    ############## UNIFIED FUSION ################
-    class AVStutterNet(nn.Module):
-        def __init__(self):
-            super(AVStutterNet, self).__init__()
-            self.fc_dim = 768 // 2
-            # self.fc_dim_clf = 96 * 4
-
-
-            self.temporal_summarization_a = nn.Sequential(
-                nn.Conv1d(in_channels = 149, out_channels = 90, kernel_size=3, stride=1, padding=1),
-                nn.ReLU(),
-                nn.Dropout(p=0.5)
-            )
-
-            # self.ln0 = nn.LayerNorm(self.fc_dim)
-            self.ln0_a = nn.LayerNorm(self.fc_dim * 2)
-            self.ln0_v = nn.LayerNorm(self.fc_dim * 2)
-
-
-            # Feature summarization -- audio
-            self.layer1_a = nn.Sequential(
-                torch.nn.Conv2d(in_channels = 1, out_channels = 1, kernel_size=3, stride=1, padding=1),
-                torch.nn.ReLU(),
-                torch.nn.MaxPool2d(kernel_size=2, stride=2),
-                torch.nn.Dropout(p=0.5)
-            )
-
-            self.layer1_bn_a = nn.BatchNorm2d(1)
-
-            # Feature summarization -- video
-            self.layer1_v = nn.Sequential(
-                torch.nn.Conv2d(in_channels = 1, out_channels = 1, kernel_size=3, stride=1, padding=1),
-                torch.nn.ReLU(),
-                torch.nn.MaxPool2d(kernel_size=2, stride=2),
-                torch.nn.Dropout(p=0.5)
-            )
-            self.layer1_bn_v = nn.BatchNorm2d(1)
-
-            self.tf_encoder = encoder(self.fc_dim, device)
-
-            self.norm1D_a = nn.LayerNorm(self.fc_dim)
-            self.norm1D_v = nn.LayerNorm(self.fc_dim)
-            self.norm1D_f = nn.LayerNorm(self.fc_dim)
-
-            self.clf_head = nn.Sequential(
-                nn.Linear(self.fc_dim, self.fc_dim // 2),
-                nn.LeakyReLU(),
-                nn.Linear(self.fc_dim // 2, self.fc_dim // 4),
-                nn.LeakyReLU(),
-                nn.Linear(self.fc_dim // 4, 2),
-                # nn.Softmax(dim=1)
-            )
-
-            # self.param_a = torch.nn.Parameter(torch.randn(768))
-            # self.param_v = torch.nn.Parameter(torch.randn(768))
-
-            # Create a learnable parameter with a constraint
-            self.param_a = torch.nn.Parameter(torch.randn(self.fc_dim), requires_grad=True)
-            # Set the constraint
-            self.param_a.register_hook(lambda grad: grad.clamp(min=0, max=1))
-
-            self.param_v = torch.nn.Parameter(torch.randn(self.fc_dim), requires_grad=True)
-            # Set the constraint
-            self.param_v.register_hook(lambda grad: grad.clamp(min=0, max=1))
-
-
-        def forward(self, x_a, x_v):
-            ## RandomMask augmentation
-            x_v = RandomMasking(p=0.5)(x_v)
-            if (len(x_a.shape) == 3):
-                x_a = x_a.unsqueeze(1)
-            if (len(x_v.shape) == 3):
-                x_v = x_v.unsqueeze(1)
-
-            ########## Project audio to same temporal dimension and fuse ##########
-            if (len(x_a.shape) == 4):
-                x_a = x_a.squeeze(1)
-            if (len(x_v.shape) == 4):
-                x_v = x_v.squeeze(1)
-            x_a = self.temporal_summarization_a(x_a)
-
-            x_a =self.ln0_a(x_a)
-            x_v =self.ln0_v(x_v)
-
-            ######### AUDIO feature summarization #########
-            if len(x_a.shape) == 3:
-                x_a = x_a.unsqueeze(1)
-            out_a = self.layer1_a(x_a)
-            out_a = self.layer1_bn_a(out_a)
-            # squeeze out_a
-            out_a = out_a.squeeze(1)
-
-            ########## AUDIO through common temporal encoder ##########
-            ### Call the temporal learning module : TF encoder
-            # Current input -- B,T,F
-            # Expected input -- T,B,F
-            out_a = out_a.permute(1, 0, 2)
-            out_a = self.tf_encoder(out_a)
-            ## Permute back to B,T,F
-            out_a = out_a.permute(1, 0, 2)
-            ## Normalize out_a
-            out_a =  self.norm1D_a(out_a)
-            out_a = out_a.mean(1, keepdim=True)  ## Mean pool along the temporal axis
-            out_a = out_a.squeeze(1)
-
-            ######### VIDEO feature summarization #########
-            if len(x_v.shape) == 3:
-                x_v = x_v.unsqueeze(1)
-            out_v = self.layer1_v(x_v)
-            out_v = self.layer1_bn_v(out_v)
-            # squeeze out_v
-            out_v = out_v.squeeze(1)
-
-            ## Pass only if all x_v is not 0
-            if (x_v == 0.0).all():
-                out_v = out_a
-            else:
-                ########## VIDEO through common temporal encoder ##########
-                ### Call the temporal learning module : TF encoder
-                # Current input -- B,T,F
-                # Expected input -- T,B,F
-
-                out_v = out_v.permute(1, 0, 2)
-                out_v = self.tf_encoder(out_v)
-                ## Permute back to B,T,F
-                out_v = out_v.permute(1, 0, 2)
-                ## Normalize out_v
-                out_v =  self.norm1D_v(out_v)
-                out_v = out_v.mean(1, keepdim=True)  ## Mean pool along the temporal axis
-                out_v = out_v.squeeze(1)
-            ########## FUSE both the feature sets by adding ##########
-            out = self.param_a * out_a + self.param_v * out_v
-
-            # Normalise the fused feature
-            out = self.norm1D_f(out)
-            # unsqueeze the feature dimension
-            out = out.view(out.size(0), -1)
-            # print('Input data shape after view:', x.shape)
-            out = self.clf_head(out)
-
-
-            return out
     # ############### Optimiser and Loss Function ################
     model = AVStutterNet()
     # print(model)
@@ -635,7 +637,10 @@ if __name__ == '__main__':
             feat_a = feat_a.to(device).float()
             feat_v = feat_v.to(device).float()
 
-            class_output = model(feat_a, feat_v)
+            feat_v = RandomMasking(p=0.5)(feat_v)
+
+            x_mix = torch.cat((feat_a, feat_v), dim=2)
+            class_output = model(x_mix)
 
             # loss list of a batch
             loss_class_iter = class_loss_criterion(class_output, y)
@@ -700,7 +705,8 @@ if __name__ == '__main__':
                 feat_a = feat_a.to(device).float()
                 feat_v = feat_v.to(device).float()
 
-                class_output= model(feat_a, feat_v)
+                x_mix = torch.cat((feat_a, feat_v), dim=2)
+                class_output = model(x_mix)
 
                 # loss list of a batch
                 class_loss_list[i] = class_loss_criterion(class_output, y)
@@ -729,7 +735,9 @@ if __name__ == '__main__':
             feat_v = RandomMasking(p=p_mask)(feat_v)
             feat_a = feat_a.to(device).float()
             feat_v = feat_v.to(device).float()
-            flops, params = profile(model, (feat_a, feat_v,))
+            x_mix = torch.cat((feat_a, feat_v), dim=2)
+
+            flops, params = profile(model, (x_mix,))
             break
         print('flops: %.2f M, params: %.2f M' % (flops / 1e6, params / 1e6))
         wandb.log({'flops': flops, 'params': params})
@@ -741,9 +749,10 @@ if __name__ == '__main__':
             feat_v = RandomMasking(p=p_mask)(feat_v)
             feat_a = feat_a.to(device).float()
             feat_v = feat_v.to(device).float()
+            x_mix = torch.cat((feat_a, feat_v), dim=2)
             torch.cuda.synchronize()
             start = time.time()
-            class_output = model(feat_a, feat_v)
+            class_output = model(x_mix)
             torch.cuda.synchronize()
             end = time.time()
             break
@@ -800,7 +809,7 @@ if __name__ == '__main__':
         'epoch': num_epochs + trained_epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict' : optimizer.state_dict(),
-    }, filename=model_chkpt_pth +f'{base_name}{num_epochs + trained_epoch:04d}.pth')
+    }, filename=model_chkpt_pth +f'{base_name}_{num_epochs + trained_epoch:04d}.pth')
 
     if test_matric:
         matric_FPS(test_dataloader, model,device)
